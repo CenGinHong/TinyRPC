@@ -1,27 +1,39 @@
-package main
+package tiny
 
 import (
 	"TinyRPC/codec"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
+)
+
+const (
+	connected        = "200 Connected to Tiny RPC"
+	defaultRPCPath   = "/_tinyrpc"
+	defaultDebugPath = "/debug/tinyrpc"
 )
 
 const MagicNumber = 0x3bef5c
 
 type Option struct {
-	MagicNumber int
-	CodecType   codec.Type
+	MagicNumber    int
+	CodecType      codec.Type    // 解编码器
+	ConnectTimeout time.Duration // 连接时间
+	HandleTimeout  time.Duration // 处理时间
 }
 
 var DefaultOption = &Option{
-	MagicNumber: MagicNumber,
-	CodecType:   codec.GobType,
+	MagicNumber:    MagicNumber,
+	CodecType:      codec.GobType,    // 解编码器
+	ConnectTimeout: time.Second * 10, // 连接器
 }
 
 var DefaultServer = NewServer()
@@ -74,12 +86,12 @@ func (s *Server) ServeConn(conn io.ReadWriteCloser) {
 		return
 	}
 	// 使用解编码器进行处理
-	s.serveCodec(f(conn))
+	s.serveCodec(f(conn), &opt)
 }
 
 var invalidRequest = struct{}{}
 
-func (s *Server) serveCodec(cc codec.Codec) {
+func (s *Server) serveCodec(cc codec.Codec, opt *Option) {
 	// 使用解编码器来处理conn中的信息
 	sending := &sync.Mutex{}
 	wg := &sync.WaitGroup{}
@@ -98,7 +110,7 @@ func (s *Server) serveCodec(cc codec.Codec) {
 		}
 		wg.Add(1)
 		// 处理请求
-		go s.handleRequest(cc, req, sending, wg)
+		go s.handleRequest(cc, req, sending, wg, opt.HandleTimeout)
 	}
 	wg.Wait()
 	_ = cc.Close()
@@ -157,16 +169,39 @@ func (s *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{},
 	return
 }
 
-func (s *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
+func (s *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-	// 调用方法
-	err := req.svc.call(req.mtype, req.argv, req.replyv)
-	if err != nil {
-		req.h.Error = err.Error()
-		s.sendResponse(cc, req.h, invalidRequest, sending)
+	called := make(chan struct{}, 1)
+	// 这里一定要有缓存，否则在下面的
+	sent := make(chan struct{}, 1)
+	go func() {
+		err := req.svc.call(req.mtype, req.argv, req.replyv)
+		called <- struct{}{}
+		if err != nil {
+			req.h.Error = err.Error()
+			s.sendResponse(cc, req.h, invalidRequest, sending)
+			sent <- struct{}{}
+			return
+		}
+		s.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+		sent <- struct{}{}
+	}()
+	if timeout == 0 {
+		<-called
+		<-sent
 		return
 	}
-	s.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+	select {
+	case <-time.After(timeout):
+		{
+			req.h.Error = fmt.Sprintf("rpc server: request handle timeout: expect within %s", timeout)
+			s.sendResponse(cc, req.h, invalidRequest, sending)
+		}
+	case <-called:
+		{
+			<-sent
+		}
+	}
 }
 
 func (s *Server) Register(rcvr interface{}) error {
@@ -198,6 +233,38 @@ func (s *Server) findService(serviceMethod string) (svc *service, mtype *methodT
 		err = errors.New("rpc server: can't find method " + methodName)
 	}
 	return
+}
+
+// ServeHTTP 接受HTTP的CONNECT请求，并回应RPC请求
+func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// 仅接受CONNECT请求
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "test/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	// 劫持http请求，即接管了http请求
+	// HTTP 库和 HTTPServer 库将不会管理这个 Socket 连接的生命周期，这个生命周期已经划给 Hijacker 了,然后基于http连接来进行rpc过程
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	s.ServeConn(conn)
+}
+
+func (s *Server) HandleHTTP() {
+	// 将基于该路径下的HTTP协议Conn划给rpc
+	http.Handle(defaultRPCPath, s)
+	// 类似同上
+	http.Handle(defaultDebugPath, debugHTTP{s})
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
 }
 
 func Register(rcvr interface{}) error {

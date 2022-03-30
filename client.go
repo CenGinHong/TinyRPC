@@ -1,14 +1,19 @@
-package main
+package tiny
 
 import (
 	"TinyRPC/codec"
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
+	"time"
 )
 
 type Call struct {
@@ -172,20 +177,7 @@ func parseOptions(opts ...*Option) (*Option, error) {
 }
 
 func Dial(network string, address string, opts ...*Option) (client *Client, err error) {
-	opt, err := parseOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if client == nil {
-			_ = conn.Close()
-		}
-	}()
-	return NewClient(conn, opt)
+	return dialTimeout(NewClient, network, address, opts...)
 }
 
 func (c *Client) send(call *Call) {
@@ -223,7 +215,103 @@ func (c *Client) Go(serviceMethod string, args interface{}, reply interface{}, d
 	return call
 }
 
-func (c *Client) Call(serviceMethod string, args interface{}, reply interface{}) error {
-	call := <-c.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+func (c *Client) Call(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error {
+	// ctx中可能存在超时控制
+	call := c.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	select {
+	case <-ctx.Done():
+		{
+			c.removeCall(call.Seq)
+			return errors.New("rpc client: call failed: " + ctx.Err().Error())
+		}
+	case call := <-call.Done:
+		{
+			return call.Error
+		}
+	}
+}
+
+type clientResult struct {
+	client *Client
+	err    error
+}
+
+type newClientFunc func(conn net.Conn, opt *Option) (client *Client, err error)
+
+func dialTimeout(f newClientFunc, network string, address string, opts ...*Option) (client *Client, err error) {
+	// 获取opt
+	opt, err := parseOptions(opts...)
+	if err != nil {
+		return nil, err
+	}
+	// 原生拨号获取conn
+	conn, err := net.DialTimeout(network, address, opt.ConnectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = conn.Close()
+		}
+	}()
+	ch := make(chan clientResult, 1)
+	go func() {
+		client, err := f(conn, opt)
+		if err != nil {
+			return
+		}
+		ch <- clientResult{client: client, err: err}
+	}()
+	// 如果没有设超时，阻塞等待连接成功
+	if opt.ConnectTimeout == 0 {
+		result := <-ch
+		return result.client, result.err
+	}
+	// 采用超时逻辑
+	select {
+	case <-time.After(opt.ConnectTimeout):
+		{
+			return nil, fmt.Errorf("rpc client: connect timeout: expect within %s", opt.ConnectTimeout)
+		}
+	case result := <-ch:
+		{
+			return result.client, result.err
+		}
+	}
+}
+
+func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
+	// 写入conn
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
+	// 读取请求
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err == nil && resp.Status == connected {
+		return NewClient(conn, opt)
+	}
+	if err == nil {
+		err = errors.New("unexpected HTTP response " + resp.Status)
+	}
+	return nil, err
+}
+
+func DialHTTP(network string, address string, opts ...*Option) (*Client, error) {
+	return dialTimeout(NewHTTPClient, network, address, opts...)
+}
+
+func XDial(rpcAddr string, opts ...*Option) (*Client, error) {
+	parts := strings.Split(rpcAddr, "@")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("rpc client err: wrong format '%s', expect protocol@addr", rpcAddr)
+	}
+	protocol, addr := parts[0], parts[1]
+	switch protocol {
+	case "http":
+		{
+			return DialHTTP("tcp", addr, opts...)
+		}
+	default:
+		{
+			return Dial(protocol, addr, opts...)
+		}
+	}
 }
