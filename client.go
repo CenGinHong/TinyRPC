@@ -280,11 +280,13 @@ func dialTimeout(f newClientFunc, network string, address string, opts ...*Optio
 	}
 }
 
+// NewHTTPClient 该初始化器会与服务端进行通信发生协议转换
 func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
 	// 写入conn
 	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
 	// 读取请求
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	// 进行协议转换后再新建客户端
 	if err == nil && resp.Status == connected {
 		return NewClient(conn, opt)
 	}
@@ -303,6 +305,7 @@ func XDial(rpcAddr string, opts ...*Option) (*Client, error) {
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("rpc client err: wrong format '%s', expect protocol@addr", rpcAddr)
 	}
+	// 获取
 	protocol, addr := parts[0], parts[1]
 	switch protocol {
 	case "http":
