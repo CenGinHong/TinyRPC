@@ -24,8 +24,8 @@ type Discovery interface {
 	GetAll() ([]string, error)           // 返回所有服务实例
 }
 
-// MultiServersDisCovery 手动维护server列表
-type MultiServersDisCovery struct {
+// MultiServersDiscovery 手动维护server列表
+type MultiServersDiscovery struct {
 	r       *rand.Rand
 	mu      sync.RWMutex
 	servers []string
@@ -33,12 +33,12 @@ type MultiServersDisCovery struct {
 }
 
 // Refresh 没有注册中心的情况下无意义，不实现
-func (m *MultiServersDisCovery) Refresh() error {
+func (m *MultiServersDiscovery) Refresh() error {
 	return nil
 }
 
 // Update 更新服务列表
-func (m *MultiServersDisCovery) Update(servers []string) error {
+func (m *MultiServersDiscovery) Update(servers []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.servers = servers
@@ -46,7 +46,7 @@ func (m *MultiServersDisCovery) Update(servers []string) error {
 }
 
 // Get 获取server地址
-func (m *MultiServersDisCovery) Get(mode SelectMode) (string, error) {
+func (m *MultiServersDiscovery) Get(mode SelectMode) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := len(m.servers)
@@ -71,7 +71,7 @@ func (m *MultiServersDisCovery) Get(mode SelectMode) (string, error) {
 	}
 }
 
-func (m *MultiServersDisCovery) GetAll() ([]string, error) {
+func (m *MultiServersDiscovery) GetAll() ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	servers := make([]string, len(m.servers), len(m.servers))
@@ -79,8 +79,8 @@ func (m *MultiServersDisCovery) GetAll() ([]string, error) {
 	return servers, nil
 }
 
-func NewMultiServerDiscovery(servers []string) *MultiServersDisCovery {
-	d := &MultiServersDisCovery{
+func NewMultiServerDiscovery(servers []string) *MultiServersDiscovery {
+	d := &MultiServersDiscovery{
 		servers: servers,
 		r:       rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -88,4 +88,4 @@ func NewMultiServerDiscovery(servers []string) *MultiServersDisCovery {
 	return d
 }
 
-var _ Discovery = (*MultiServersDisCovery)(nil)
+var _ Discovery = (*MultiServersDiscovery)(nil)

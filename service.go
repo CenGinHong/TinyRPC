@@ -1,4 +1,4 @@
-package tiny
+package tinyRPC
 
 import (
 	"go/ast"

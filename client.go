@@ -1,12 +1,12 @@
-package tiny
+package tinyRPC
 
 import (
-	"TinyRPC/codec"
 	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/CenGinHong/TinyRPC/codec"
 	"io"
 	"log"
 	"net"

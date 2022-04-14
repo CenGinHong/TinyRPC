@@ -1,8 +1,8 @@
 package xclient
 
 import (
-	tiny "TinyRPC"
 	"context"
+	tiny "github.com/CenGinHong/TinyRPC"
 	"io"
 	"reflect"
 	"sync"

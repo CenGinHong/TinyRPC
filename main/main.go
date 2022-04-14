@@ -1,11 +1,13 @@
 package main
 
 import (
-	tiny "TinyRPC"
-	"TinyRPC/xclient"
 	"context"
+	tiny "github.com/CenGinHong/TinyRPC"
+	"github.com/CenGinHong/TinyRPC/registry"
+	"github.com/CenGinHong/TinyRPC/xclient"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -28,13 +30,38 @@ func (f Foo) Sleep(args Args, reply *int) error {
 	return nil
 }
 
-func startServer(addrCh chan string) {
+func startServer(registryAddr string, wg *sync.WaitGroup) {
 	var foo Foo
 	l, _ := net.Listen("tcp", ":0")
 	server := tiny.NewServer()
 	_ = server.Register(&foo)
-	addrCh <- l.Addr().String()
+	registry.Heartbeat(registryAddr, "tcp@"+l.Addr().String(), 0)
+	wg.Done()
 	server.Accept(l)
+}
+
+func startRegistry(wg *sync.WaitGroup) {
+	l, _ := net.Listen("tcp", ":9999")
+	registry.HandleHTTP()
+	wg.Done()
+	_ = http.Serve(l, nil)
+}
+
+func call(registry string) {
+	d := xclient.NewTinyRegistryDiscovery(registry, 0)
+	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
+	defer func() {
+		_ = xc.Close()
+	}()
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			foo(xc, context.Background(), "call", "Foo.Sum", &Args{Num1: i, Num2: i * i})
+		}(i)
+	}
+	wg.Wait()
 }
 
 func foo(xc *xclient.XClient, ctx context.Context, typ string, serviceMethod string, args *Args) {
@@ -57,25 +84,8 @@ func foo(xc *xclient.XClient, ctx context.Context, typ string, serviceMethod str
 	}
 }
 
-func call(addr1, addr2 string) {
-	d := xclient.NewMultiServerDiscovery([]string{"tcp@" + addr1, "tcp@" + addr2})
-	xc := xclient.NewXClient(d, xclient.RoundRobinSelect, nil)
-	defer func() {
-		_ = xc.Close()
-	}()
-	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			foo(xc, context.Background(), "call", "Foo.Sum", &Args{Num1: i, Num2: i * i})
-		}(i)
-	}
-	wg.Wait()
-}
-
-func broadcast(addr1 string, addr2 string) {
-	d := xclient.NewMultiServerDiscovery([]string{"tcp@" + addr1, "tcp@" + addr2})
+func broadcast(registry string) {
+	d := xclient.NewTinyRegistryDiscovery(registry, 0)
 	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
 	defer func() {
 		_ = xc.Close()
@@ -95,14 +105,17 @@ func broadcast(addr1 string, addr2 string) {
 
 func main() {
 	log.SetFlags(0)
-	ch1 := make(chan string)
-	ch2 := make(chan string)
-	go startServer(ch1)
-	go startServer(ch2)
-	addr1 := <-ch1
-	addr2 := <-ch2
+	registryAddr := "http://localhost:9999/_tinyrpc/registry"
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go startRegistry(&wg)
+	wg.Wait()
 	time.Sleep(time.Second)
-	call(addr1, addr2)
-	broadcast(addr1, addr2)
-
+	wg.Add(2)
+	go startServer(registryAddr, &wg)
+	go startServer(registryAddr, &wg)
+	wg.Wait()
+	time.Sleep(time.Second)
+	call(registryAddr)
+	broadcast(registryAddr)
 }
